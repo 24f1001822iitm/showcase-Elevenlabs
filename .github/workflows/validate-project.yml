@@ -7,6 +7,16 @@ on:
       - 'authors/**.yml'
     types: [opened, synchronize, reopened]
 
+# Least-privilege token: checkout needs read; PR comments need pull-requests write.
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel superseded runs when a PR is updated (only the latest commit matters).
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -25,18 +35,23 @@ jobs:
 
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@v41
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
         with:
+          separator: "\n"
           files: |
             projects/**.mdx
             authors/**.yml
 
       - name: Validate MDX frontmatter
         if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          # Pass the changed-files list as data (never interpolated into the shell source).
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
           echo "Validating project submissions..."
-          
-          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
             echo "Checking $file"
             
             if [[ $file == projects/*.mdx ]]; then
@@ -63,7 +78,7 @@ jobs:
               
               # Validate categories
               valid_categories="agents|text-to-speech|speech-to-text|music|voices"
-              categories=$(echo "$frontmatter" | sed -n '/categories:/,/^[^ ]/p' | grep "^  - " | sed 's/^  - //')
+              categories=$(echo "$frontmatter" | sed -n '/categories:/,/^[^ ]/p' | grep "^  - " | sed 's/^  - //' | head -n 50)
               
               while IFS= read -r category; do
                 if ! echo "$category" | grep -qE "^($valid_categories)$"; then
@@ -74,7 +89,7 @@ jobs:
               done <<< "$categories"
               
               # Extract author IDs
-              author_ids=$(echo "$frontmatter" | sed -n '/authorIds:/,/^[^ ]/p' | grep "^  - " | sed 's/^  - //')
+              author_ids=$(echo "$frontmatter" | sed -n '/authorIds:/,/^[^ ]/p' | grep "^  - " | sed 's/^  - //' | head -n 50)
               
               # Check if author files exist
               while IFS= read -r author_id; do
@@ -104,18 +119,22 @@ jobs:
               
               echo "✓ Author file $file is valid"
             fi
-          done
-          
+          done <<< "$ALL_CHANGED_FILES"
+
           echo "✅ All validations passed!"
 
       - name: Check image files
         if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          # Pass the changed-files list as data (never interpolated into the shell source).
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
             if [[ $file == projects/*.mdx ]]; then
-              # Extract image path from frontmatter
-              image_path=$(grep "^image:" "$file" | sed 's/image: //' | tr -d '"' | sed 's/^/public/')
-              
+              # Extract image path from frontmatter (bounded to the first match).
+              image_path=$(grep "^image:" "$file" | head -n 1 | sed 's/image: //' | tr -d '"' | sed 's/^/public/')
+
               if [[ ! -f "$image_path" ]]; then
                 echo "WARNING: Image file '$image_path' not found for $file"
                 echo "Please add the image file to the PR or update the image path"
@@ -123,7 +142,7 @@ jobs:
                 echo "✓ Image file found: $image_path"
               fi
             fi
-          done
+          done <<< "$ALL_CHANGED_FILES"
 
       - name: Comment on PR
         if: success() && steps.changed-files.outputs.any_changed == 'true'
